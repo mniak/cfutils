@@ -136,7 +136,7 @@ func registerPipelines(s *server.MCPServer) {
 }
 
 type PipelineListInput struct {
-	Name string `json:"name" jsonschema:"description=Filter pipelines by name (loose match)"`
+	Name string `json:"name" jsonschema:"Filter pipelines by name (loose match)"`
 }
 
 type PipelineItem struct {
@@ -146,9 +146,9 @@ type PipelineItem struct {
 }
 
 type PipelineRunInput struct {
-	ID        string            `json:"id" jsonschema:"description=Pipeline ID to trigger"`
-	Branch    string            `json:"branch,omitempty" jsonschema:"description=Branch to build"`
-	Variables map[string]string `json:"variables,omitempty" jsonschema:"description=Key-value variables to pass to the build"`
+	ID        string            `json:"id" jsonschema:"Pipeline ID to trigger"`
+	Branch    string            `json:"branch,omitempty" jsonschema:"Branch to build"`
+	Variables map[string]string `json:"variables,omitempty" jsonschema:"Key-value variables to pass to the build"`
 }
 
 type PipelineRunResult struct {
@@ -182,7 +182,7 @@ func registerBuilds(s *server.MCPServer) {
 }
 
 type BuildProgressInput struct {
-	BuildID string `json:"build_id" jsonschema:"description=Build ID to fetch progress for"`
+	BuildID string `json:"build_id" jsonschema:"Build ID to fetch progress for"`
 }
 
 // --- workflows ---
@@ -267,8 +267,8 @@ func registerWorkflows(s *server.MCPServer) {
 }
 
 type WorkflowListInput struct {
-	Runtime string `json:"runtime,omitempty" jsonschema:"description=Filter by runtime name"`
-	Project string `json:"project,omitempty" jsonschema:"description=Filter by project name"`
+	Runtime string `json:"runtime,omitempty" jsonschema:"Filter by runtime name"`
+	Project string `json:"project,omitempty" jsonschema:"Filter by project name"`
 }
 
 type WorkflowItem struct {
@@ -279,7 +279,7 @@ type WorkflowItem struct {
 }
 
 type WorkflowGetInput struct {
-	UID string `json:"uid" jsonschema:"description=Workflow UID to retrieve"`
+	UID string `json:"uid" jsonschema:"Workflow UID to retrieve"`
 }
 
 type WorkflowDetail struct {
