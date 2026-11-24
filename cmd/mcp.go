@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/codefresh-io/go-sdk/pkg/rest"
 	platmodel "github.com/codefresh-io/go-sdk/pkg/model/platform"
+	"github.com/codefresh-io/go-sdk/pkg/rest"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/mniak/cfutils/codefresh"
+	cfutils "github.com/mniak/cfutils"
 	"github.com/spf13/cobra"
 )
 
@@ -25,12 +25,6 @@ func newMCPCommand() *cobra.Command {
 			setupMCPLogging(verbose)
 			slog.Debug("starting MCP server")
 
-			svc, err := newMCPService()
-			if err != nil {
-				slog.Error("initialization failed", "error", err)
-				os.Exit(1)
-			}
-
 			mcpServer := server.NewMCPServer("cfutils", "0.1.0",
 				server.WithInstructions("Codefresh utilities exposed over MCP. Tools return structured JSON."),
 				server.WithToolCapabilities(false),
@@ -39,14 +33,13 @@ func newMCPCommand() *cobra.Command {
 				server.WithRecovery(),
 			)
 
-			registerTokens(svc, mcpServer)
-			registerPipelines(svc, mcpServer)
-			registerBuilds(svc, mcpServer)
-			registerWorkflows(svc, mcpServer)
-			registerAccounts(svc, mcpServer)
-			registerRuntimes(svc, mcpServer)
-			registerClusters(svc, mcpServer)
-			registerGitSources(svc, mcpServer)
+			registerPipelines(mcpServer)
+			registerBuilds(mcpServer)
+			registerWorkflows(mcpServer)
+			registerAccounts(mcpServer)
+			registerRuntimes(mcpServer)
+			registerClusters(mcpServer)
+			registerGitSources(mcpServer)
 
 			if err := server.ServeStdio(mcpServer); err != nil {
 				slog.Error("server terminated", "error", err)
@@ -60,26 +53,6 @@ func newMCPCommand() *cobra.Command {
 	return cmd
 }
 
-// mcpService holds the authenticated Codefresh client and the browser token reader.
-type mcpService struct {
-	token      string
-	refreshTok string
-	cfClient   *codefresh.Client
-}
-
-func newMCPService() (*mcpService, error) {
-	accessToken, refreshToken, err := codefresh.TokensFromBrowser("chrome")
-	if err != nil {
-		return nil, fmt.Errorf("reading tokens from browser: %w", err)
-	}
-	client := codefresh.New("", accessToken)
-	return &mcpService{
-		token:      accessToken,
-		refreshTok: refreshToken,
-		cfClient:   client,
-	}, nil
-}
-
 func setupMCPLogging(verbose bool) {
 	level := slog.LevelInfo
 	if verbose {
@@ -88,43 +61,18 @@ func setupMCPLogging(verbose bool) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
-func registerTokens(svc *mcpService, s *server.MCPServer) {
-	s.AddTool(
-		mcp.NewTool("codefresh_tokens",
-			mcp.WithDescription("Read the Codefresh session tokens from the browser's local storage"),
-			mcp.WithInputSchema[TokensInput](),
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithIdempotentHintAnnotation(true),
-			mcp.WithOpenWorldHintAnnotation(false),
-		),
-		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in TokensInput) (*TokensResult, error) {
-			browser := in.Browser
-			if browser == "" {
-				browser = "chrome"
-			}
-			accessToken, refreshToken, err := codefresh.TokensFromBrowser(browser)
-			if err != nil {
-				return nil, fmt.Errorf("reading tokens: %w", err)
-			}
-			return &TokensResult{
-				AccessToken:  accessToken,
-				RefreshToken: refreshToken,
-			}, nil
-		}),
-	)
+func newClient() (*cfutils.Client, error) {
+	browser := flags.Browser
+	accessToken, _, err := cfutils.TokensFromBrowser(browser)
+	if err != nil {
+		return nil, fmt.Errorf("reading tokens from %s: %w", browser, err)
+	}
+	return cfutils.New("", accessToken), nil
 }
 
-type TokensInput struct {
-	Browser string `json:"browser" jsonschema:"description=Browser to read tokens from (chrome, brave, edge, etc.),default=chrome"`
-}
+// --- pipelines ---
 
-type TokensResult struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-}
-
-func registerPipelines(svc *mcpService, s *server.MCPServer) {
+func registerPipelines(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_pipeline_list",
 			mcp.WithDescription("List Codefresh pipelines, optionally filtered by name"),
@@ -135,20 +83,25 @@ func registerPipelines(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineListInput) ([]PipelineItem, error) {
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
 			filters := map[string]string{"limit": "50"}
 			if in.Name != "" {
 				filters["id"] = in.Name
 			}
-			pipelines, err := svc.cfClient.Rest().Pipeline().List(filters)
+			pipelines, err := client.Rest().Pipeline().List(filters)
 			if err != nil {
 				return nil, fmt.Errorf("listing pipelines: %w", err)
 			}
 			items := make([]PipelineItem, len(pipelines))
 			for i, p := range pipelines {
 				items[i] = PipelineItem{
-					Name:      p.Metadata.Name,
-					Project:   p.Metadata.Project,
-					ID:        p.Metadata.ID,
+					Name:    p.Metadata.Name,
+					Project: p.Metadata.Project,
+					ID:      p.Metadata.ID,
 				}
 			}
 			return items, nil
@@ -165,7 +118,12 @@ func registerPipelines(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineRunInput) (*PipelineRunResult, error) {
-			buildID, err := svc.cfClient.Rest().Pipeline().Run(in.ID, &rest.RunOptions{
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			buildID, err := client.Rest().Pipeline().Run(in.ID, &rest.RunOptions{
 				Branch:    in.Branch,
 				Variables: in.Variables,
 			})
@@ -197,7 +155,9 @@ type PipelineRunResult struct {
 	BuildID string `json:"build_id"`
 }
 
-func registerBuilds(svc *mcpService, s *server.MCPServer) {
+// --- builds ---
+
+func registerBuilds(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_build_progress",
 			mcp.WithDescription("Get the progress document of a Codefresh build, including step status and logs"),
@@ -207,8 +167,12 @@ func registerBuilds(svc *mcpService, s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in BuildProgressInput) (*codefresh.Progress, error) {
-			progress, err := svc.cfClient.BuildProgress(ctx, in.BuildID)
+		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in BuildProgressInput) (*cfutils.Progress, error) {
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+			progress, err := client.BuildProgress(ctx, in.BuildID)
 			if err != nil {
 				return nil, fmt.Errorf("getting build progress: %w", err)
 			}
@@ -221,7 +185,9 @@ type BuildProgressInput struct {
 	BuildID string `json:"build_id" jsonschema:"description=Build ID to fetch progress for"`
 }
 
-func registerWorkflows(svc *mcpService, s *server.MCPServer) {
+// --- workflows ---
+
+func registerWorkflows(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_workflow_list",
 			mcp.WithDescription("List Codefresh workflows, optionally filtered by runtime and project"),
@@ -232,11 +198,20 @@ func registerWorkflows(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowListInput) ([]WorkflowItem, error) {
-			filterArgs := platmodel.WorkflowsFilterArgs{
-				Runtime: &in.Runtime,
-				Project: &in.Project,
+			client, err := newClient()
+			if err != nil {
+				return nil, err
 			}
-			workflows, err := svc.cfClient.GraphQL().Workflow().List(ctx, filterArgs)
+
+			filterArgs := platmodel.WorkflowsFilterArgs{}
+			if in.Runtime != "" {
+				filterArgs.Runtime = &in.Runtime
+			}
+			if in.Project != "" {
+				filterArgs.Project = &in.Project
+			}
+
+			workflows, err := client.GraphQL().Workflow().List(ctx, filterArgs)
 			if err != nil {
 				return nil, fmt.Errorf("listing workflows: %w", err)
 			}
@@ -245,7 +220,6 @@ func registerWorkflows(svc *mcpService, s *server.MCPServer) {
 				items[i] = WorkflowItem{
 					Name:    w.Metadata.Name,
 					Runtime: w.Metadata.Runtime,
-					Phase:   w.Status.Phase.String(),
 				}
 				if w.Metadata.Namespace != nil {
 					items[i].Namespace = *w.Metadata.Namespace
@@ -268,22 +242,24 @@ func registerWorkflows(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowGetInput) (*WorkflowDetail, error) {
-			workflow, err := svc.cfClient.GraphQL().Workflow().Get(ctx, in.UID)
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			workflow, err := client.GraphQL().Workflow().Get(ctx, in.UID)
 			if err != nil {
 				return nil, fmt.Errorf("getting workflow: %w", err)
 			}
 			if workflow == nil {
 				return nil, nil
 			}
-			detail := &WorkflowDetail{
-				Name:  workflow.Metadata.Name,
-				Phase: workflow.Status.Phase.String(),
+			detail := &WorkflowDetail{Name: workflow.Metadata.Name}
+			if w := workflow.Metadata.Namespace; w != nil {
+				detail.Namespace = *w
 			}
-			if workflow.Metadata.Namespace != nil {
-				detail.Namespace = *workflow.Metadata.Namespace
-			}
-			if workflow.Metadata.UID != nil {
-				detail.UID = *workflow.Metadata.UID
+			if w := workflow.Metadata.UID; w != nil {
+				detail.UID = *w
 			}
 			return detail, nil
 		}),
@@ -297,10 +273,9 @@ type WorkflowListInput struct {
 
 type WorkflowItem struct {
 	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Namespace string `json:"namespace,omitempty"`
 	Runtime   string `json:"runtime"`
-	UID       string `json:"uid"`
-	Phase     string `json:"phase"`
+	UID       string `json:"uid,omitempty"`
 }
 
 type WorkflowGetInput struct {
@@ -309,12 +284,13 @@ type WorkflowGetInput struct {
 
 type WorkflowDetail struct {
 	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Phase     string `json:"phase"`
-	UID       string `json:"uid"`
+	Namespace string `json:"namespace,omitempty"`
+	UID       string `json:"uid,omitempty"`
 }
 
-func registerAccounts(svc *mcpService, s *server.MCPServer) {
+// --- accounts ---
+
+func registerAccounts(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_account_get",
 			mcp.WithDescription("Get the active Codefresh account information"),
@@ -325,7 +301,12 @@ func registerAccounts(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(false),
 		),
 		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) (*AccountInfo, error) {
-			user, err := svc.cfClient.GraphQL().User().GetCurrent(ctx)
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			user, err := client.GraphQL().User().GetCurrent(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("getting current user: %w", err)
 			}
@@ -333,9 +314,7 @@ func registerAccounts(svc *mcpService, s *server.MCPServer) {
 			if account == nil {
 				return &AccountInfo{}, nil
 			}
-			info := AccountInfo{
-				ID: account.ID,
-			}
+			info := AccountInfo{ID: account.ID}
 			if account.Name != nil {
 				info.Name = *account.Name
 			}
@@ -349,7 +328,9 @@ type AccountInfo struct {
 	ID   string `json:"id,omitempty"`
 }
 
-func registerRuntimes(svc *mcpService, s *server.MCPServer) {
+// --- runtimes ---
+
+func registerRuntimes(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_runtime_list",
 			mcp.WithDescription("List Codefresh runtimes"),
@@ -360,7 +341,12 @@ func registerRuntimes(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) ([]RuntimeItem, error) {
-			runtimes, err := svc.cfClient.GraphQL().Runtime().List(ctx)
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			runtimes, err := client.GraphQL().Runtime().List(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("listing runtimes: %w", err)
 			}
@@ -381,7 +367,9 @@ type RuntimeItem struct {
 	InstallationType string `json:"installation_type,omitempty"`
 }
 
-func registerClusters(svc *mcpService, s *server.MCPServer) {
+// --- clusters ---
+
+func registerClusters(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_cluster_list",
 			mcp.WithDescription("List Codefresh clusters for the active account"),
@@ -392,16 +380,21 @@ func registerClusters(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) ([]ClusterItem, error) {
-			clusters, err := svc.cfClient.Rest().Cluster().GetAccountClusters()
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			clusters, err := client.Rest().Cluster().GetAccountClusters()
 			if err != nil {
 				return nil, fmt.Errorf("listing clusters: %w", err)
 			}
 			items := make([]ClusterItem, len(clusters))
 			for i, c := range clusters {
 				items[i] = ClusterItem{
-					Name:      c.Cluster.Name,
-					Provider:  c.Provider,
-					Selector:  c.Selector,
+					Name:     c.Cluster.Name,
+					Provider: c.Provider,
+					Selector: c.Selector,
 				}
 			}
 			return items, nil
@@ -415,7 +408,9 @@ type ClusterItem struct {
 	Selector string `json:"selector"`
 }
 
-func registerGitSources(svc *mcpService, s *server.MCPServer) {
+// --- git sources ---
+
+func registerGitSources(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("codefresh_git_context_list",
 			mcp.WithDescription("List Codefresh git contexts"),
@@ -426,7 +421,12 @@ func registerGitSources(svc *mcpService, s *server.MCPServer) {
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
 		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) ([]GitContextItem, error) {
-			contexts, err := svc.cfClient.Rest().Context().GetGitContexts()
+			client, err := newClient()
+			if err != nil {
+				return nil, err
+			}
+
+			contexts, err := client.Rest().Context().GetGitContexts()
 			if err != nil {
 				return nil, fmt.Errorf("listing git contexts: %w", err)
 			}

@@ -1,4 +1,4 @@
-package codefresh
+package cfutils
 
 type Progress struct {
 	AccountID       string            `json:"accountId"`

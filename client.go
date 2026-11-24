@@ -1,4 +1,4 @@
-package codefresh
+package cfutils
 
 import (
 	"net/http"

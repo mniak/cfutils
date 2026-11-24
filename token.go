@@ -1,4 +1,4 @@
-package codefresh
+package cfutils
 
 import (
 	"os"
@@ -8,7 +8,6 @@ import (
 
 	"github.com/noperator/chromedb"
 	"github.com/pkg/errors"
-	"github.com/samber/lo"
 )
 
 var browserApps = map[string]struct{ app, profile string }{
@@ -61,7 +60,6 @@ func browserLevelDBPath(browser string) (string, error) {
 }
 
 func AccessTokenFromBrowser(browser string) (string, error) {
-	browser = lo.CoalesceOrEmpty(browser, "chrome")
 	dbPath, err := browserLevelDBPath(browser)
 	if err != nil {
 		return "", err
@@ -85,7 +83,6 @@ func accessTokenFromLevelDB(dbPath string) (string, error) {
 }
 
 func RefreshTokenFromBrowser(browser string) (string, error) {
-	browser = lo.CoalesceOrEmpty(browser, "chrome")
 	dbPath, err := browserLevelDBPath(browser)
 	if err != nil {
 		return "", err
@@ -109,7 +106,6 @@ func refreshTokenFromLevelDB(dbPath string) (string, error) {
 }
 
 func TokensFromBrowser(browser string) (accessToken, refreshToken string, err error) {
-	browser = lo.CoalesceOrEmpty(browser, "chrome")
 	dbPath, err := browserLevelDBPath(browser)
 	if err != nil {
 		return "", "", err
