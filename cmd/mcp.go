@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,9 +24,9 @@ func newMCPCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			setupMCPLogging(verbose)
-			slog.Debug("starting MCP server")
+			slog.Debug("starting MCP server", "browser", flags.Browser)
 
-			mcpServer := server.NewMCPServer("cfutils", "0.1.0",
+			s := server.NewMCPServer("cfutils", "0.1.0",
 				server.WithInstructions("Codefresh utilities exposed over MCP. Tools return structured JSON."),
 				server.WithToolCapabilities(false),
 				server.WithResourceCapabilities(false, false),
@@ -33,15 +34,15 @@ func newMCPCommand() *cobra.Command {
 				server.WithRecovery(),
 			)
 
-			registerPipelines(mcpServer)
-			registerBuilds(mcpServer)
-			registerWorkflows(mcpServer)
-			registerAccounts(mcpServer)
-			registerRuntimes(mcpServer)
-			registerClusters(mcpServer)
-			registerGitSources(mcpServer)
+			registerPipelines(s)
+			registerBuilds(s)
+			registerWorkflows(s)
+			registerAccounts(s)
+			registerRuntimes(s)
+			registerClusters(s)
+			registerGitSources(s)
 
-			if err := server.ServeStdio(mcpServer); err != nil {
+			if err := server.ServeStdio(s); err != nil {
 				slog.Error("server terminated", "error", err)
 				os.Exit(1)
 			}
@@ -62,12 +63,19 @@ func setupMCPLogging(verbose bool) {
 }
 
 func newClient() (*cfutils.Client, error) {
-	browser := flags.Browser
-	accessToken, _, err := cfutils.TokensFromBrowser(browser)
+	accessToken, _, err := cfutils.TokensFromBrowser(flags.Browser)
 	if err != nil {
-		return nil, fmt.Errorf("reading tokens from %s: %w", browser, err)
+		return nil, fmt.Errorf("reading tokens from %s: %w", flags.Browser, err)
 	}
 	return cfutils.New("", accessToken), nil
+}
+
+func textResult(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("serializing result: %w", err)
+	}
+	return string(b), nil
 }
 
 // --- pipelines ---
@@ -82,10 +90,10 @@ func registerPipelines(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineListInput) ([]PipelineItem, error) {
+		mcp.NewTypedToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineListInput) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			filters := map[string]string{"limit": "50"}
@@ -94,17 +102,24 @@ func registerPipelines(s *server.MCPServer) {
 			}
 			pipelines, err := client.Rest().Pipeline().List(filters)
 			if err != nil {
-				return nil, fmt.Errorf("listing pipelines: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("listing pipelines: %v", err)), nil
 			}
-			items := make([]PipelineItem, len(pipelines))
+
+			type item struct {
+				Name    string `json:"name"`
+				Project string `json:"project"`
+				ID      string `json:"id"`
+			}
+			items := make([]item, len(pipelines))
 			for i, p := range pipelines {
-				items[i] = PipelineItem{
+				items[i] = item{
 					Name:    p.Metadata.Name,
 					Project: p.Metadata.Project,
 					ID:      p.Metadata.ID,
 				}
 			}
-			return items, nil
+			result, _ := textResult(items)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
 
@@ -117,10 +132,10 @@ func registerPipelines(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineRunInput) (*PipelineRunResult, error) {
+		mcp.NewTypedToolHandler(func(_ context.Context, _ mcp.CallToolRequest, in PipelineRunInput) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			buildID, err := client.Rest().Pipeline().Run(in.ID, &rest.RunOptions{
@@ -128,9 +143,11 @@ func registerPipelines(s *server.MCPServer) {
 				Variables: in.Variables,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("running pipeline: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("running pipeline: %v", err)), nil
 			}
-			return &PipelineRunResult{BuildID: buildID}, nil
+
+			result, _ := textResult(map[string]string{"build_id": buildID})
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
 }
@@ -139,20 +156,10 @@ type PipelineListInput struct {
 	Name string `json:"name" jsonschema:"Filter pipelines by name (loose match)"`
 }
 
-type PipelineItem struct {
-	Name    string `json:"name"`
-	Project string `json:"project"`
-	ID      string `json:"id"`
-}
-
 type PipelineRunInput struct {
 	ID        string            `json:"id" jsonschema:"Pipeline ID to trigger"`
 	Branch    string            `json:"branch,omitempty" jsonschema:"Branch to build"`
 	Variables map[string]string `json:"variables,omitempty" jsonschema:"Key-value variables to pass to the build"`
-}
-
-type PipelineRunResult struct {
-	BuildID string `json:"build_id"`
 }
 
 // --- builds ---
@@ -167,16 +174,17 @@ func registerBuilds(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in BuildProgressInput) (*cfutils.Progress, error) {
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in BuildProgressInput) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 			progress, err := client.BuildProgress(ctx, in.BuildID)
 			if err != nil {
-				return nil, fmt.Errorf("getting build progress: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("getting build progress: %v", err)), nil
 			}
-			return progress, nil
+			result, _ := textResult(progress)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
 }
@@ -197,10 +205,10 @@ func registerWorkflows(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowListInput) ([]WorkflowItem, error) {
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowListInput) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			filterArgs := platmodel.WorkflowsFilterArgs{}
@@ -213,11 +221,18 @@ func registerWorkflows(s *server.MCPServer) {
 
 			workflows, err := client.GraphQL().Workflow().List(ctx, filterArgs)
 			if err != nil {
-				return nil, fmt.Errorf("listing workflows: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("listing workflows: %v", err)), nil
 			}
-			items := make([]WorkflowItem, len(workflows))
+
+			type item struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace,omitempty"`
+				Runtime   string `json:"runtime"`
+				UID       string `json:"uid,omitempty"`
+			}
+			items := make([]item, len(workflows))
 			for i, w := range workflows {
-				items[i] = WorkflowItem{
+				items[i] = item{
 					Name:    w.Metadata.Name,
 					Runtime: w.Metadata.Runtime,
 				}
@@ -228,7 +243,8 @@ func registerWorkflows(s *server.MCPServer) {
 					items[i].UID = *w.Metadata.UID
 				}
 			}
-			return items, nil
+			result, _ := textResult(items)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
 
@@ -241,27 +257,34 @@ func registerWorkflows(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowGetInput) (*WorkflowDetail, error) {
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, in WorkflowGetInput) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			workflow, err := client.GraphQL().Workflow().Get(ctx, in.UID)
 			if err != nil {
-				return nil, fmt.Errorf("getting workflow: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("getting workflow: %v", err)), nil
 			}
 			if workflow == nil {
-				return nil, nil
+				return mcp.NewToolResultText("null"), nil
 			}
-			detail := &WorkflowDetail{Name: workflow.Metadata.Name}
+
+			type detail struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace,omitempty"`
+				UID       string `json:"uid,omitempty"`
+			}
+			d := detail{Name: workflow.Metadata.Name}
 			if w := workflow.Metadata.Namespace; w != nil {
-				detail.Namespace = *w
+				d.Namespace = *w
 			}
 			if w := workflow.Metadata.UID; w != nil {
-				detail.UID = *w
+				d.UID = *w
 			}
-			return detail, nil
+			result, _ := textResult(d)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
 }
@@ -271,21 +294,8 @@ type WorkflowListInput struct {
 	Project string `json:"project,omitempty" jsonschema:"Filter by project name"`
 }
 
-type WorkflowItem struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
-	Runtime   string `json:"runtime"`
-	UID       string `json:"uid,omitempty"`
-}
-
 type WorkflowGetInput struct {
 	UID string `json:"uid" jsonschema:"Workflow UID to retrieve"`
-}
-
-type WorkflowDetail struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
-	UID       string `json:"uid,omitempty"`
 }
 
 // --- accounts ---
@@ -300,32 +310,34 @@ func registerAccounts(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(false),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) (*AccountInfo, error) {
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			user, err := client.GraphQL().User().GetCurrent(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("getting current user: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("getting current user: %v", err)), nil
 			}
 			account := user.ActiveAccount
 			if account == nil {
-				return &AccountInfo{}, nil
+				result, _ := textResult(map[string]string{})
+				return mcp.NewToolResultText(result), nil
 			}
-			info := AccountInfo{ID: account.ID}
+
+			type info struct {
+				Name string `json:"name,omitempty"`
+				ID   string `json:"id,omitempty"`
+			}
+			i := info{ID: account.ID}
 			if account.Name != nil {
-				info.Name = *account.Name
+				i.Name = *account.Name
 			}
-			return &info, nil
+			result, _ := textResult(i)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
-}
-
-type AccountInfo struct {
-	Name string `json:"name,omitempty"`
-	ID   string `json:"id,omitempty"`
 }
 
 // --- runtimes ---
@@ -340,31 +352,32 @@ func registerRuntimes(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) ([]RuntimeItem, error) {
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			runtimes, err := client.GraphQL().Runtime().List(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("listing runtimes: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("listing runtimes: %v", err)), nil
 			}
-			items := make([]RuntimeItem, len(runtimes))
+
+			type item struct {
+				Name             string `json:"name"`
+				InstallationType string `json:"installation_type,omitempty"`
+			}
+			items := make([]item, len(runtimes))
 			for i, r := range runtimes {
-				items[i] = RuntimeItem{
+				items[i] = item{
 					Name:             r.Metadata.Name,
 					InstallationType: string(r.InstallationType),
 				}
 			}
-			return items, nil
+			result, _ := textResult(items)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
-}
-
-type RuntimeItem struct {
-	Name             string `json:"name"`
-	InstallationType string `json:"installation_type,omitempty"`
 }
 
 // --- clusters ---
@@ -379,33 +392,34 @@ func registerClusters(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) ([]ClusterItem, error) {
+		mcp.NewTypedToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			clusters, err := client.Rest().Cluster().GetAccountClusters()
 			if err != nil {
-				return nil, fmt.Errorf("listing clusters: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("listing clusters: %v", err)), nil
 			}
-			items := make([]ClusterItem, len(clusters))
+
+			type item struct {
+				Name     string `json:"name"`
+				Provider string `json:"provider"`
+				Selector string `json:"selector"`
+			}
+			items := make([]item, len(clusters))
 			for i, c := range clusters {
-				items[i] = ClusterItem{
+				items[i] = item{
 					Name:     c.Cluster.Name,
 					Provider: c.Provider,
 					Selector: c.Selector,
 				}
 			}
-			return items, nil
+			result, _ := textResult(items)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
-}
-
-type ClusterItem struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	Selector string `json:"selector"`
 }
 
 // --- git sources ---
@@ -420,29 +434,30 @@ func registerGitSources(s *server.MCPServer) {
 			mcp.WithIdempotentHintAnnotation(true),
 			mcp.WithOpenWorldHintAnnotation(true),
 		),
-		mcp.NewStructuredToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) ([]GitContextItem, error) {
+		mcp.NewTypedToolHandler(func(_ context.Context, _ mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, error) {
 			client, err := newClient()
 			if err != nil {
-				return nil, err
+				return mcp.NewToolResultError(err.Error()), nil
 			}
 
 			contexts, err := client.Rest().Context().GetGitContexts()
 			if err != nil {
-				return nil, fmt.Errorf("listing git contexts: %w", err)
+				return mcp.NewToolResultError(fmt.Sprintf("listing git contexts: %v", err)), nil
 			}
-			items := make([]GitContextItem, len(contexts))
+
+			type item struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			}
+			items := make([]item, len(contexts))
 			for i, c := range contexts {
-				items[i] = GitContextItem{
+				items[i] = item{
 					Name: c.Metadata.Name,
 					Type: c.Spec.Type,
 				}
 			}
-			return items, nil
+			result, _ := textResult(items)
+			return mcp.NewToolResultText(result), nil
 		}),
 	)
-}
-
-type GitContextItem struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
 }
